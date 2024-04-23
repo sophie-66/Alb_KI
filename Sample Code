@@ -1,0 +1,151 @@
+***********
+* TABLE 1 *
+***********
+* Example of caluclating median, minimum, and maximum for urinary albumin, urinary creatinine, and uacr using domain statements for stratification; 
+proc surveymeans data=work.nhanes_alb nomcar median q1 q3;
+	weight WTMEC8YR;
+	cluster sdmvpsu;
+	strata sdmvstra;
+	*domain pop*riagendr;
+	*domain pop*riagendr*age_cat; 
+	domain pop*riagendr*egfr_cat; 
+	*var ualb; 
+	*var ucr; 
+	var uacr; 
+run;
+
+proc surveymeans data=work.nhanes_alb nomcar min max;
+	weight WTMEC8YR;
+	cluster sdmvpsu;
+	strata sdmvstra;
+	*domain pop*riagendr;
+	*domain pop*riagendr*age_cat; 
+	domain pop*riagendr*egfr_cat; 
+	*var ualb; 
+	*var ucr; 
+	var uacr; 
+run;
+
+* Example of exporting distribution and probability plots for urine albumin, urine creatinine, and uacr; 
+ods pdf file='C:mydata/results';
+proc univariate data=work.nhanes_alb plots; 
+	weight wtmec8yr; 
+	where pop=1 and riagendr=1;
+	*var ualb;
+	var ucr; 
+	*var uacr; 
+run; 
+ods pdf close; 
+
+*******************
+* 99th percentiles*
+*******************; 
+* MACRO to create bootstrap replicate weights for variance estimation;
+* https://support.sas.com/resources/papers/proceedings12/343-2012.pdf; 
+
+data work.fulldata; set work.nhanes_alb; 
+numboot=2000;
+run; 
+
+%macro bootwt (fulldata, WTMEC8YR, sdmvstra, sdmvpsu, numboot, fullrep, repwt);
+ /* Input
+ fulldata full data set name
+ wt name of weight variable
+ stratvar name of stratification variable
+ psuvar name of psu (cluster) variable
+ numboot number of bootstrap replicates desired
+ fullrep name of data set to contain replicate weights
+ repwt name of array in fullrep to contain bootstrap weights */
+ /* In this implementation, output data set fullrep also contains all of the
+ information in the original data set fulldata. */
+ /* MUST HAVE at least 2 clusters in each stratum */
+ /* Construct data set with list of strata and clusters */
+
+ proc sort data= &fulldata out= fulldata;
+ by &sdmvstra &sdmvpsu;
+ run;
+ proc sql stimer;
+ create table psulist as
+ select distinct &sdmvstra, &sdmvpsu
+ from fulldata
+ order by &sdmvstra, &sdmvpsu
+ ;
+
+ /* Set stratum sample size to n_h - 1 */
+ create table numpsu as
+ select distinct &sdmvstra, count(*)-1 as _nsize_
+ from psulist
+ group by &sdmvstra
+ order by &sdmvstra
+ ;
+ quit;
+ data fulldata (drop= _nsize_);
+ merge fulldata (in= inf)
+numpsu (in= inn);
+ by &sdmvstra;
+ if inf & inn;
+ wtmult = (_nsize_ + 1) / _nsize_;
+ run;
+
+ /* Select samples for replicate bootstrap weights */
+ proc surveyselect data=psulist method=urs sampsize=numpsu out=repout outall
+ seed=501586000
+ reps=&numboot;
+ strata &sdmvstra;
+ id &sdmvpsu;
+ run;
+ proc sort data= repout (keep= &sdmvstra &sdmvpsu replicate numberhits)
+ out= repout_sorted
+ ;
+ by &sdmvstra &sdmvpsu replicate;
+ run;
+ proc transpose data= repout_sorted (keep= &sdmvstra &sdmvpsu replicate numberhits)
+ out= repout_tr (keep= &sdmvstra &sdmvpsu repmult: )
+ prefix=repmult;
+ by &sdmvstra &sdmvpsu;
+ id replicate;
+ var numberhits;
+ run;
+
+ /* Ok, now we have a dataset repout with the number of hits for
+ each bootstrap replicate. Now merge this data set
+ with the original full data and multiply each original weight
+ times the number of hits in repmult times (n_h/(n_h-1)). */
+ data &fullrep (drop= i repmult1-repmult&numboot wtmult);
+ array &repwt (&numboot);
+ array repmult (&numboot);
+ merge fulldata (in= inf)
+ repout_tr (in= inr)
+ ;
+ by &sdmvstra &sdmvpsu;
+ do i = 1 to &numboot;
+ &repwt(i) = &WTMEC8YR * repmult(i) * wtmult;
+ end;
+ run;
+%mend bootwt;
+
+* Example of cacluating 95th percentiles of urine albumine, creatinine, and uacr using domain statements to stratify; 
+proc surveymeans data=work.nhanes_alb percentile=(95) nomcar ;
+	weight WTMEC8YR;
+	cluster sdmvpsu;
+	strata sdmvstra;
+	domain pop*riagendr; 
+	*domain pop*riagendr*age_cat;
+	*domain pop*riagendr*egfr_cat; 
+	*var ualb; 
+	*var ucr; 
+	var uacr; 
+run;
+
+* example of calculating 95% CI around the point estimate 95th percentile; 
+%bootwt (fulldata, WTMEC8YR, sdmvstra, sdmvpsu, 2000, nhanesbt, repwt); 
+proc surveymeans data=nhanesbt varmethod=jk percentile=(95);
+ weight WTMEC8YR;
+ domain pop*riagendr;
+ *domain pop*riagendr*age_cat;
+ *domain pop*riagendr*egfr_cat; 
+	var ualb; 
+	*var ucr; 
+	*var uacr;
+ repweights repwt1-repwt2000 / jkcoef = 0.00005 df=16; 
+run; 
